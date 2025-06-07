@@ -97,3 +97,114 @@
 (define-private (get-tag-or-none (id uint))
   (map-get? pay-tags { id: id })
 )
+
+;; Read-Only Functions
+
+;; Get the current BitTag ID counter
+(define-read-only (get-last-id)
+  (ok (var-get last-id))
+)
+
+;; Retrieve details of a specific BitTag
+(define-read-only (get-pay-tag (id uint))
+  (match (map-get? pay-tags { id: id })
+    entry (ok entry)
+    (err ERR-NOT-FOUND)
+  )
+)
+
+;; Get all BitTag IDs created by a specific principal
+(define-read-only (get-creator-tags (creator principal))
+  (match (map-get? tags-by-creator { creator: creator })
+    entry (ok (get ids entry))
+    (ok (list))
+  )
+)
+
+;; Get all BitTag IDs where principal is the recipient  
+(define-read-only (get-recipient-tags (recipient principal))
+  (match (map-get? tags-by-recipient { recipient: recipient })
+    entry (ok (get ids entry))
+    (ok (list))
+  )
+)
+
+;; Check if a BitTag has expired but hasn't been marked as expired
+(define-read-only (check-tag-expired (id uint))
+  (match (map-get? pay-tags { id: id })
+    tag (if (and
+        (is-eq (get state tag) STATE-PENDING)
+        (is-expired (get expires-at tag))
+      )
+      (ok true)
+      (ok false)
+    )
+    (err ERR-NOT-FOUND)
+  )
+)
+
+;; Public Transaction Functions
+
+;; Create a new BitTag payment request
+(define-public (create-pay-tag
+    (amount uint)
+    (expires-in uint)
+    (memo (optional (string-ascii 256)))
+  )
+  (let (
+      (new-id (+ (var-get last-id) u1))
+      (expiration-height (+ stacks-block-height expires-in))
+      (recipient tx-sender)
+      ;; Create a clean memo value to avoid unchecked data warning
+      (validated-memo (if (is-some memo)
+        (let ((memo-str (unwrap-panic memo)))
+          (if (and (> (len memo-str) u0) (<= (len memo-str) u256))
+            (some memo-str)
+            none
+          )
+        )
+        none
+      ))
+    )
+    (begin
+      ;; Input validation
+      (asserts! (> amount u0) (err ERR-INVALID-AMOUNT))
+      (asserts! (<= expires-in MAX-EXPIRATION-BLOCKS)
+        (err ERR-MAX-EXPIRATION-EXCEEDED)
+      )
+      (asserts! (<= amount u340282366920938463463374607431768211455)
+        (err ERR-INVALID-AMOUNT)
+      ) ;; Max uint check
+      ;; Create new BitTag
+      (var-set last-id new-id)
+      (map-set pay-tags { id: new-id } {
+        creator: tx-sender,
+        recipient: recipient,
+        amount: amount,
+        created-at: stacks-block-height,
+        expires-at: expiration-height,
+        memo: validated-memo,
+        state: STATE-PENDING,
+        payment-tx: none,
+      })
+      ;; Update indexes
+      (let ((creator-result (add-id-to-principal-list tx-sender new-id)))
+        (if (not (is-eq recipient tx-sender))
+          (let ((recipient-result (add-id-to-principal-list recipient new-id)))
+            true
+          )
+          true
+        )
+      )
+      ;; Emit creation event
+      (print {
+        event: "bittag-created",
+        id: new-id,
+        creator: tx-sender,
+        amount: amount,
+        expires-at: expiration-height,
+      })
+      (ok new-id)
+    )
+  )
+)
