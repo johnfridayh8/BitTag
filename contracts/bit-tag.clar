@@ -208,3 +208,110 @@
     )
   )
 )
+
+;; Fulfill a BitTag payment request
+(define-public (fulfill-pay-tag (id uint))
+  (let (
+      (tag (unwrap! (map-get? pay-tags { id: id }) (err ERR-NOT-FOUND)))
+      (placeholder-tx-hash 0x)
+      ;; Validate ID bounds
+      (validated-id (if (and (> id u0) (<= id (var-get last-id)))
+        id
+        u0
+      ))
+    )
+    (begin
+      ;; Input validation
+      (asserts! (> validated-id u0) (err ERR-NOT-FOUND))
+      ;; Validate payment conditions
+      (asserts! (is-eq (get state tag) STATE-PENDING) (err ERR-NOT-PENDING))
+      (asserts! (< stacks-block-height (get expires-at tag)) (err ERR-EXPIRED))
+      ;; Execute sBTC transfer on Bitcoin Layer 2
+      (try! (contract-call? SBTC-CONTRACT transfer (get amount tag) tx-sender
+        (get recipient tag) none
+      ))
+      ;; Update BitTag state to paid
+      (map-set pay-tags { id: validated-id }
+        (merge tag {
+          state: STATE-PAID,
+          payment-tx: none,
+        })
+      )
+      ;; Emit payment completion event
+      (print {
+        event: "bittag-fulfilled",
+        id: validated-id,
+        payer: tx-sender,
+        recipient: (get recipient tag),
+        amount: (get amount tag),
+        memo: (get memo tag),
+      })
+      (ok validated-id)
+    )
+  )
+)
+
+;; Cancel a pending BitTag (creator only)
+(define-public (cancel-pay-tag (id-input uint))
+  (let (
+      ;; Validate ID bounds first
+      (validated-id (if (and (> id-input u0) (<= id-input (var-get last-id)))
+        id-input
+        u0
+      ))
+      (tag (unwrap! (map-get? pay-tags { id: validated-id }) (err ERR-NOT-FOUND)))
+    )
+    (begin
+      ;; Input validation
+      (asserts! (> validated-id u0) (err ERR-NOT-FOUND))
+      ;; Authorization check
+      (asserts! (is-eq tx-sender (get creator tag)) (err ERR-UNAUTHORIZED))
+      (asserts! (is-eq (get state tag) STATE-PENDING) (err ERR-NOT-PENDING))
+      ;; Update state to canceled
+      (map-set pay-tags { id: validated-id }
+        (merge tag { state: STATE-CANCELED })
+      )
+      ;; Emit cancellation event
+      (print {
+        event: "bittag-canceled",
+        id: validated-id,
+        creator: tx-sender,
+      })
+      (ok validated-id)
+    )
+  )
+)
+
+;; Mark an expired BitTag as expired (callable by anyone)
+(define-public (mark-expired (id-input uint))
+  (let (
+      ;; Validate ID bounds first
+      (validated-id (if (and (> id-input u0) (<= id-input (var-get last-id)))
+        id-input
+        u0
+      ))
+      (tag (unwrap! (map-get? pay-tags { id: validated-id }) (err ERR-NOT-FOUND)))
+    )
+    (begin
+      ;; Input validation
+      (asserts! (> validated-id u0) (err ERR-NOT-FOUND))
+      ;; Validate expiration conditions
+      (asserts! (is-eq (get state tag) STATE-PENDING) (err ERR-NOT-PENDING))
+      (asserts! (is-expired (get expires-at tag)) (err u107))
+      ;; Update state to expired
+      (map-set pay-tags { id: validated-id } (merge tag { state: STATE-EXPIRED }))
+      ;; Emit expiration event
+      (print {
+        event: "bittag-expired",
+        id: validated-id,
+        expired-at: stacks-block-height,
+      })
+      (ok validated-id)
+    )
+  )
+)
+
+;; Batch retrieve multiple BitTags (optimized for UI applications)
+(define-public (get-multiple-tags (ids (list 20 uint)))
+  (ok (map get-tag-or-none ids))
+)
